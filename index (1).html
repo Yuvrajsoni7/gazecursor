@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GazeCursor</title>
+<style>
+:root{--bg:#10202b;--panel:#1a3040;--ink:#e9f0ea;--mute:#9fb3ba;--gaze:#ffcf5c;--ok:#6fd3a5}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:18px/1.5 "Trebuchet MS","Segoe UI",system-ui,sans-serif}
+h1,h2{font-family:Georgia,"Times New Roman",serif;font-weight:700;margin:0 0 .4em;letter-spacing:.2px}
+button{font:inherit;color:var(--ink);background:var(--panel);border:2px solid #33566b;border-radius:14px;padding:18px 26px;cursor:pointer}
+button:focus-visible{outline:3px solid var(--gaze);outline-offset:3px}
+button.gaze-hover{border-color:var(--gaze);background:#244357}
+button.primary{background:var(--gaze);color:#1b1500;border-color:var(--gaze);font-weight:700}
+#intro,#calib{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;background:var(--bg)}
+#calib{display:none;z-index:60}
+#intro p{max-width:56ch;color:var(--mute)}
+#msg{min-height:1.6em;color:var(--gaze)}
+.dot{position:absolute;width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;background:var(--gaze);box-shadow:0 0 0 8px rgba(255,207,92,.25);transition:transform .15s}
+.dot.go{animation:shrink 1.4s ease-in forwards}
+@keyframes shrink{from{transform:scale(1.3)}to{transform:scale(.45)}}
+#calText{position:absolute;bottom:6%;color:var(--mute);width:100%;left:0}
+#app{display:none;padding:28px max(24px,6vw) 70vh}
+header.bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:28px}
+.bar .ctl{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.bar button{padding:12px 18px}
+label.dw{color:var(--mute);display:flex;gap:8px;align-items:center}
+input[type=range]{accent-color:var(--gaze);width:140px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}
+.grid button{min-height:130px;font-size:22px}
+.grid button.on{background:var(--ok);color:#06241a;border-color:var(--ok);font-weight:700}
+#log{margin:28px 0;padding:16px 20px;background:var(--panel);border-radius:14px;color:var(--mute)}
+.tall{height:520px;margin-top:40px;padding:22px;border-radius:14px;border:2px dashed #33566b;color:var(--mute)}
+#cur{position:fixed;left:0;top:0;width:44px;height:44px;margin:-22px 0 0 -22px;pointer-events:none;z-index:999;display:none}
+#cur svg{width:100%;height:100%;transform:rotate(-90deg)}
+#cur .core{fill:var(--gaze)}
+#cur .ring{fill:none;stroke:var(--gaze);stroke-width:4;stroke-dasharray:119.4;stroke-dashoffset:119.4}
+#cur .base{fill:none;stroke:rgba(255,207,92,.35);stroke-width:2}
+#cam{position:fixed;right:14px;bottom:14px;width:150px;border-radius:10px;opacity:.75;z-index:70;transform:scaleX(-1);display:none}
+#zoneT,#zoneB{position:fixed;left:0;right:0;height:9vh;pointer-events:none;z-index:5;display:none;color:var(--mute);font-size:14px;text-align:center}
+#zoneT{top:0;background:linear-gradient(#10202bee,transparent)}#zoneB{bottom:0;background:linear-gradient(transparent,#10202bee)}
+@media (prefers-reduced-motion:reduce){.dot.go{animation:none}}
+</style>
+</head>
+<body>
+
+<section id="intro">
+  <h1>Control the cursor with your eyes</h1>
+  <p>Your webcam finds your eyes and works out where on the screen you are looking. Everything runs in this browser tab; no video is sent anywhere.</p>
+  <p>Sit about an arm's length from the screen, face a light source, and keep your head fairly still.</p>
+  <button class="primary" id="start">Start camera and calibrate</button>
+  <div id="msg" role="status"></div>
+</section>
+
+<section id="calib"><div id="calDot" class="dot"></div><div id="calText"></div></section>
+
+<main id="app">
+  <header class="bar">
+    <h1>Gaze demo</h1>
+    <div class="ctl">
+      <label class="dw">Dwell time <input id="dwell" type="range" min="600" max="2500" step="100" value="1200"><span id="dwv">1.2s</span></label>
+      <button id="pause">Pause tracking</button>
+      <button id="recal">Recalibrate</button>
+    </div>
+  </header>
+  <p>Look at a button and hold your gaze until the ring fills. Look at the top or bottom edge of the screen to scroll.</p>
+  <div class="grid" id="grid"></div>
+  <div id="log">Last action: none yet</div>
+  <div class="tall">Scroll test area. Look at the bottom edge of the screen to scroll down, the top edge to scroll up.</div>
+  <div class="grid" style="margin-top:40px"><button data-name="Bottom button A">Bottom button A</button><button data-name="Bottom button B">Bottom button B</button></div>
+</main>
+
+<div id="zoneT">scroll up</div><div id="zoneB">scroll down</div>
+<video id="cam" autoplay playsinline muted></video>
+<div id="cur"><svg viewBox="0 0 44 44"><circle class="base" cx="22" cy="22" r="19"/><circle class="ring" id="ring" cx="22" cy="22" r="19"/><circle class="core" cx="22" cy="22" r="5"/></svg></div>
+
+<script type="module">
+import {FaceLandmarker, FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $ = id => document.getElementById(id);
+const video = $("cam"), cur = $("cur"), ring = $("ring");
+let landmarker, feat = null, model = null, tracking = false, paused = false, calibrating = false;
+
+// ---- demo buttons ----
+const names = ["Lights","Music","Call family","Water","Help","Yes","No","Thank you"];
+$("grid").innerHTML = names.map(n => `<button data-name="${n}">${n}</button>`).join("");
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-name]"); if (!b) return;
+  b.classList.toggle("on");
+  $("log").textContent = "Last action: pressed \u201c" + b.dataset.name + "\u201d at " + new Date().toLocaleTimeString();
+});
+$("dwell").oninput = e => $("dwv").textContent = (e.target.value/1000).toFixed(1) + "s";
+$("pause").onclick = () => { paused = !paused; $("pause").textContent = paused ? "Resume tracking" : "Pause tracking"; cur.style.display = paused ? "none" : "block"; };
+$("recal").onclick = () => runCalibration();
+addEventListener("keydown", e => { if (e.key === "Escape" && tracking) $("pause").click(); });
+
+// ---- start ----
+$("start").onclick = async () => {
+  $("start").disabled = true; $("msg").textContent = "Loading eye tracker\u2026";
+  try {
+    const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    landmarker = await FaceLandmarker.createFromOptions(fs, {
+      baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate:"GPU"},
+      runningMode:"VIDEO", numFaces:1
+    });
+    $("msg").textContent = "Starting camera\u2026";
+    video.srcObject = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:"user"}});
+    await video.play();
+    video.style.display = "block"; tracking = true; loop();
+    runCalibration();
+  } catch (err) {
+    $("start").disabled = false;
+    $("msg").textContent = "Could not start: " + (err.name === "NotAllowedError" ? "camera permission was denied. Allow camera access and try again." : err.message);
+  }
+};
+
+// ---- feature extraction ----
+const P = (l, i) => ({x:l[i].x * video.videoWidth, y:l[i].y * video.videoHeight});
+function eye(l, c1, c2, iris, up, lo){
+  const a = P(l,c1), b = P(l,c2), ir = P(l,iris), u = P(l,up), d = P(l,lo);
+  const ax = b.x-a.x, ay = b.y-a.y, w = Math.hypot(ax,ay), ex = ax/w, ey = ay/w;
+  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
+  const dx = ir.x-mx, dy = ir.y-my;
+  return [(dx*ex+dy*ey)/w, (-dx*ey+dy*ex)/w, Math.hypot(u.x-d.x,u.y-d.y)/w];
+}
+function features(l){
+  const L = eye(l,33,133,468,159,145), R = eye(l,362,263,473,386,374);
+  const n = P(l,1), f1 = P(l,234), f2 = P(l,454), fw = Math.hypot(f2.x-f1.x,f2.y-f1.y);
+  const hx = (n.x - (f1.x+f2.x)/2)/fw, hy = (n.y - (f1.y+f2.y)/2)/fw;
+  return [(L[0]+R[0])/2, (L[1]+R[1])/2, (L[2]+R[2])/2, hx, hy, (n.x/video.videoWidth), (n.y/video.videoHeight)];
+}
+
+// ---- ridge regression ----
+const expand = (f, m) => { const z = f.map((v,i) => (v-m.mu[i])/m.sd[i]); return [1, ...z, z[0]*z[0], z[1]*z[1], z[0]*z[1]]; };
+function solve(A, b){
+  const n = b.length; A = A.map((r,i) => [...r, b[i]]);
+  for (let i=0;i<n;i++){
+    let p=i; for(let r=i+1;r<n;r++) if(Math.abs(A[r][i])>Math.abs(A[p][i])) p=r;
+    [A[i],A[p]]=[A[p],A[i]];
+    for(let r=i+1;r<n;r++){ const k=A[r][i]/A[i][i]; for(let c=i;c<=n;c++) A[r][c]-=k*A[i][c]; }
+  }
+  const x = Array(n).fill(0);
+  for(let i=n-1;i>=0;i--){ let s=A[i][n]; for(let c=i+1;c<n;c++) s-=A[i][c]*x[c]; x[i]=s/A[i][i]; }
+  return x;
+}
+function fit(samples){
+  const k = samples[0].f.length;
+  const mu = Array(k).fill(0), sd = Array(k).fill(0);
+  samples.forEach(s => s.f.forEach((v,i) => mu[i]+=v/samples.length));
+  samples.forEach(s => s.f.forEach((v,i) => sd[i]+=(v-mu[i])**2/samples.length));
+  const m = {mu, sd: sd.map(v => Math.sqrt(v)||1)};
+  const X = samples.map(s => expand(s.f, m)), d = X[0].length;
+  const A = Array.from({length:d}, (_,i) => Array.from({length:d}, (_,j) => X.reduce((a,r)=>a+r[i]*r[j],0) + (i===j && i>0 ? 1.5 : 0)));
+  const wx = solve(A, Array.from({length:d}, (_,i) => X.reduce((a,r,n)=>a+r[i]*samples[n].x,0)));
+  const wy = solve(A, Array.from({length:d}, (_,i) => X.reduce((a,r,n)=>a+r[i]*samples[n].y,0)));
+  m.wx = wx; m.wy = wy; return m;
+}
+const predict = (f, m) => { const p = expand(f, m); return [p.reduce((a,v,i)=>a+v*m.wx[i],0), p.reduce((a,v,i)=>a+v*m.wy[i],0)]; };
+
+// ---- calibration ----
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function runCalibration(){
+  calibrating = true; model = null; cur.style.display = "none";
+  $("intro").style.display = "none"; $("app").style.display = "none"; $("calib").style.display = "flex";
+  $("zoneT").style.display = $("zoneB").style.display = "none";
+  const dot = $("calDot"), txt = $("calText"), samples = [];
+  const pts = [[.1,.1],[.5,.1],[.9,.1],[.1,.5],[.5,.5],[.9,.5],[.1,.9],[.5,.9],[.9,.9],[.5,.5]];
+  for (let i=0;i<pts.length;i++){
+    const [px,py] = pts[i], x = px*innerWidth, y = py*innerHeight;
+    dot.classList.remove("go"); dot.style.left = x+"px"; dot.style.top = y+"px";
+    txt.textContent = `Follow the dot with your eyes only (${i+1} of ${pts.length})`;
+    await sleep(500); dot.classList.add("go");
+    await sleep(700);
+    const t0 = performance.now();
+    while (performance.now()-t0 < 700){ if (feat) samples.push({f:feat, x, y}); await sleep(33); }
+  }
+  $("calib").style.display = "none";
+  if (samples.length < 40){ $("intro").style.display = "flex"; $("start").disabled = false; $("start").textContent = "Try again"; $("msg").textContent = "Your face was not visible enough. Check the lighting and your position."; calibrating = false; return; }
+  model = fit(samples); calibrating = false; $("app").style.display = "block";
+  $("zoneT").style.display = $("zoneB").style.display = "block";
+  cur.style.display = paused ? "none" : "block";
+}
+
+// ---- main loop ----
+let gx = innerWidth/2, gy = innerHeight/2, lastTs = -1, lostAt = 0;
+let anchor = {x:0,y:0}, dwellStart = 0, hovered = null;
+function loop(){
+  requestAnimationFrame(loop);
+  if (!tracking || video.readyState < 2 || video.currentTime === lastTs) return;
+  lastTs = video.currentTime;
+  const res = landmarker.detectForVideo(video, performance.now());
+  const l = res.faceLandmarks && res.faceLandmarks[0];
+  feat = l ? features(l) : null;
+  if (!l){ if (model && !calibrating && performance.now()-lostAt > 600) cur.style.opacity = .25; return; }
+  lostAt = performance.now(); cur.style.opacity = 1;
+  if (!model || calibrating || paused) return;
+
+  let [tx, ty] = predict(feat, model);
+  tx = Math.min(innerWidth-1, Math.max(0, tx)); ty = Math.min(innerHeight-1, Math.max(0, ty));
+  // adaptive smoothing: steady when still, quick when moving
+  const dist = Math.hypot(tx-gx, ty-gy), a = Math.min(.45, .06 + dist/900);
+  gx += (tx-gx)*a; gy += (ty-gy)*a;
+  cur.style.transform = `translate(${gx}px,${gy}px)`;
+
+  // edge scrolling
+  if (gy < innerHeight*.09) scrollBy(0,-10); else if (gy > innerHeight*.91) scrollBy(0,10);
+
+  // dwell click
+  const now = performance.now();
+  const el = document.elementFromPoint(gx, gy)?.closest("button,a,input,[data-name]");
+  if (el !== hovered){ hovered?.classList.remove("gaze-hover"); el?.classList.add("gaze-hover"); hovered = el; dwellStart = now; }
+  if (el && el.closest("#app")){
+    if (Math.hypot(gx-anchor.x, gy-anchor.y) > 80){ anchor = {x:gx,y:gy}; dwellStart = now; }
+    const p = Math.max(0, (now-dwellStart) / +$("dwell").value);
+    ring.style.strokeDashoffset = 119.4 * (1 - Math.min(p,1));
+    if (p >= 1){ el.click(); dwellStart = now + 700; ring.style.strokeDashoffset = 119.4; }
+  } else { ring.style.strokeDashoffset = 119.4; dwellStart = now; anchor = {x:gx,y:gy}; }
+}
+</script>
+</body>
+</html>
